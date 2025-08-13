@@ -65,11 +65,12 @@ impl BlockEngineRelayer for RelayerStub {
                     Ok(pkt_upd) => match pkt_upd.msg {
                         Some(packet_batch_update::Msg::Batches(b)) => {
                             if let Some(batch) = b.batch {
-                                let n = batch.packets.len();
-                                // 즉시 Hub 로 publish (중간 버퍼 X)
-                                // hub.publish_packet(batch);
-                                hub.publish_local_packet(batch); 
-                                log::trace!("➡️  RELAYER → Hub  ({} pkt)", n);
+                                let n0 = batch.packets.len();
+                                let filtered = crate::blacklist::filter_batch(batch);
+                                let n1 = filtered.packets.len();
+
+                                hub.publish_local_packet(filtered);
+                                log::trace!("➡️  RELAYER → Hub  ({} pkt → {} pkt)", n0, n1);
                             }
                         }
                         Some(packet_batch_update::Msg::Heartbeat(_)) => {
@@ -88,7 +89,7 @@ impl BlockEngineRelayer for RelayerStub {
             log::warn!("🛑 gRPC inbound stream closed for {peer}");
         });
 
-        /* ────────────────────── outbound: 1 s heartbeat 스트림 ───────────────────── */
+        /* ────────────────────── outbound: 1 s heartbeat stream ───────────────────── */
         let (tx, rx) = mpsc::channel::<StartExpiringPacketStreamResponse>(4);
         tokio::spawn(async move {
             let mut intv = tokio::time::interval(Duration::from_secs(1));
@@ -104,7 +105,6 @@ impl BlockEngineRelayer for RelayerStub {
         Ok(Response::new(Box::pin(out_stream) as PacketHbStream))
     }
 
-    /* ---- (B) AOI / POI 스트림은 Stub – 사용 안 함 ---- */
     type SubscribeAccountsOfInterestStream = AoiStream;
     async fn subscribe_accounts_of_interest(
         &self,

@@ -21,7 +21,7 @@ pub mod block_engine;
 pub mod peer_manager;
 pub mod inter_region;
 pub mod utils;
-
+pub mod blacklist;
 pub mod arbitrage_feed;  
 pub mod filter_feed;
 pub mod tx_fast;

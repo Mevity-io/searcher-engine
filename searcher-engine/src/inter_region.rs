@@ -17,7 +17,8 @@ impl InterRegion for InterSvc {
 
         if msg.src_region == *LOCAL_REGION { return Ok(Response::new(Default::default())); }
         if let Some(batch) = msg.batch {
-            self.hub.publish_remote_packet(batch);
+            let filtered = crate::blacklist::filter_batch(batch);
+            self.hub.publish_remote_packet(filtered);
         }
         Ok(Response::new(Default::default()))
     }

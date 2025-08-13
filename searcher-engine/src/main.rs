@@ -7,11 +7,7 @@ use tonic::transport::Server;
 use common_utils::logging;
 
 use searcher_engine::{
-    hub::Hub,
-    block_relayer,
-    block_engine,
-    searcher,
-    inter_region,
+    blacklist, block_engine, block_relayer, hub::Hub, inter_region, searcher
 };
 
 #[tokio::main]
@@ -22,6 +18,9 @@ async fn main() -> anyhow::Result<()> {
         .format_timestamp_nanos()
         .init();
     logging::init();
+
+    // Refreshing Blacklist
+    blacklist::init(); 
 
     tokio::spawn(common_utils::metrics::serve(([0,0,0,0], 8300)));
 

@@ -78,9 +78,22 @@ impl SearcherService for SearcherRpcSvc {
         let bundle_id = gen_bundle_uuid();
         let mut tx_sigs: Vec<String> = Vec::new();
 
-        /* ── 2. Detect Front-run + extract TX sigs ───────────────────── */
+        /* ── 2. Blacklist + Detect Front-run + extract TX sigs ───────────────────── */
         let bundle = req.into_inner();
         let mut seen_searcher_tx = false;
+
+        if let Some(inner) = bundle.clone().bundle {
+            if crate::blacklist::bundle_has_blacklisted(&inner.packets) {
+                if let Ok(mut conn) = crate::hub::get_redis_conn().await {
+                    let _ = conn.set_ex::<_, _, ()>(
+                        format!("{}_status", bundle_id.clone()),
+                        "dropped_blacklist", 6*60*60
+                    ).await;
+                }
+                // common_utils::metrics::SEARCHER_BUNDLE_DROP_TOTAL.inc();
+                return Ok(Response::new(SendBundleResponse { uuid: bundle_id }));
+            }
+        }
 
         if let Ok(mut conn) = crate::hub::get_redis_conn().await {
             for pkt in &bundle.clone().bundle.unwrap().packets {

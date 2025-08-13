@@ -1,5 +1,7 @@
 // searcher-engine/src/tx_fast.rs
 use solana_sdk::transaction::VersionedTransaction;
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::message::{VersionedMessage, v0, legacy};
 
 /// Quickly extract the first signature (base58) from
 /// bincode-serialized VersionedTransaction bytes.
@@ -26,4 +28,15 @@ pub fn fast_first_signature_b58(data: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// bincode-serialized VersionedTransaction → extracts static account keys
+/// w/o LUT
+pub fn extract_static_account_keys(data: &[u8]) -> Option<Vec<Pubkey>> {
+    if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(data) {
+        match tx.message {
+            VersionedMessage::Legacy(legacy::Message { account_keys, .. }) => Some(account_keys),
+            VersionedMessage::V0(v0::Message { account_keys, .. }) => Some(account_keys),
+        }
+    } else { None }
 }
