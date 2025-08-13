@@ -17,6 +17,7 @@ Core features include:
 - **Arbitrage filtering** for targeted Solana AMMs (Raydium, Orca, Meteora, Pump.fun, etc.)  
 - **Redis integration** for leader scheduling & TX tracking  
 - **ClickHouse logging** for bundle lifecycle events  
+- **Blacklist-based Filtering** – Every hour, a blacklist is fetched from the Mevity API to drop any transactions involving known malicious wallets (e.g., sandwich attackers) without adding latency to the hot path  
 - **Metrics** exposed via Prometheus
 
 ## Architecture
@@ -25,6 +26,7 @@ Core features include:
 - **Peer Manager** – Maintains connections to other searcher engines in different regions
 - **Arbitrage Feed** – Zero-copy stream of filtered, decoded AMM swap transactions
 - **Front-run Protection** – Drops bundles containing already-seen mempool TXs
+- **Blacklist Guard (FR-Guard)** – Drops packets or bundles containing transactions from blacklisted wallets
 - **Inter-Region Service** – Shares packet & bundle data between regions
 
 ## Getting Started
@@ -45,6 +47,10 @@ MEVITY_HOST=https://your-mevity-api
 MEVITY_API_KEY=yourkey
 REDIS_SERVER=redis://127.0.0.1/
 SEARCHER_ENGINE_GRPC=0.0.0.0:50052
+
+# Optional Blacklist Settings
+# BLACKLIST_REFRESH_SECS=3600   # refresh interval in seconds (default: 3600)
+# BL_PAR_MIN=16                 # parallel filtering threshold (default: 16)
 ```
 
 ### 3. Run
@@ -57,7 +63,8 @@ cargo run -p searcher-engine
 - **Proto Compilation** – `prost` + `tonic-build`  
 - **Async Runtime** – `tokio` with multi-threaded scheduler  
 - **Parallel Parsing** – `rayon` for CPU-bound transaction decoding  
-- **Fast TX Sig Extraction** – Zero-copy base58 encoder for `VersionedTransaction`
+- **Fast TX Sig Extraction** – Zero-copy base58 encoder for `VersionedTransaction`  
+- **Low-latency Blacklist Filtering** – Uses Arc snapshots for O(1) lookups without locking in hot path
 
 ## License
 
