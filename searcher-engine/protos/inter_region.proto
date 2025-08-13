@@ -1,0 +1,17 @@
+syntax = "proto3";
+package interregion;
+
+import "bundle.proto";
+import "packet.proto";
+
+message Empty {}
+
+message PacketWrapper {
+  string src_region = 1;                 // Original region
+  packet.PacketBatch batch = 2;
+}
+
+service InterRegion {
+  rpc SendPacket(PacketWrapper) returns (Empty);
+  rpc SendBundle(bundle.BundleUuid) returns (Empty);
+}

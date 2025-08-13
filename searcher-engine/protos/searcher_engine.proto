@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package searcherengine;
+
+import "packet.proto";
+import "bundle.proto";
+
+message Empty {}
+
+/************  A. Searcher  ************/
+service SearcherStream {
+  // Realtime Packet Subscription
+  rpc SubscribePackets(Empty)
+        returns (stream packet.PacketBatch);
+
+  // Submit Bundles
+  rpc SendBundle(bundle.Bundle)
+        returns (bundle.BundleResult);
+}
+
+/************  B. Validator  ************/
+service BlockEngineStream {
+  // Submit Bundles
+  rpc SubscribeBundles(Empty) returns (stream bundle.BundleUuid);
+}
+
+/************  C. Arbitrage feed payload  ************/
+message ArbitrageIxKv { string key = 1; string val = 2; }
+message ArbitrageIx {
+  string program_id     = 1;
+  string program_label  = 2;
+  string method         = 3;
+  repeated ArbitrageIxKv attrs = 4;
+  bytes raw             = 5;
+}
+message ArbitrageTx {
+  string signature = 1;
+  bytes  raw_tx    = 2;
+  repeated ArbitrageIx ixs = 3;
+}
+message ArbitrageTxBatch { repeated ArbitrageTx txs = 1; }
+
+/************  D. Arbitrage feed service  ************/
+service ArbitrageStream {
+  rpc SubscribeArbitrage(Empty) returns (stream ArbitrageTxBatch);
+}

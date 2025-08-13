@@ -1,0 +1,11 @@
+// src/injector.proto
+syntax = "proto3";
+package injector;
+
+import "block_engine.proto";
+
+message Empty {}
+
+service BundleInjector {
+    rpc PushBundle(block_engine.SubscribeBundlesResponse) returns (Empty);
+}
