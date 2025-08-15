@@ -6,7 +6,6 @@ use prost_types::Timestamp;
 use common_utils::logging::{log_to_clickhouse, ClickhouseLog};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use solana_sdk::transaction::VersionedTransaction;
 
 use crate::{hub::SharedHub, utils::gen_bundle_uuid};
 
@@ -76,67 +75,82 @@ impl SearcherService for SearcherRpcSvc {
 
         /* ── 1. UUID  ───────────────────────────────── */
         let bundle_id = gen_bundle_uuid();
-        let mut tx_sigs: Vec<String> = Vec::new();
 
-        /* ── 2. Blacklist + Detect Front-run + extract TX sigs ───────────────────── */
+        /* ── 2-1. Blacklist + extract TX sigs ───────────────────── */
         let bundle = req.into_inner();
-        let mut seen_searcher_tx = false;
 
         if let Some(inner) = bundle.clone().bundle {
             if crate::blacklist::bundle_has_blacklisted(&inner.packets) {
-                if let Ok(mut conn) = crate::hub::get_redis_conn().await {
-                    let _ = conn.set_ex::<_, _, ()>(
-                        format!("{}_status", bundle_id.clone()),
-                        "dropped_blacklist", 6*60*60
-                    ).await;
-                }
+                let bdl = bundle_id.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut conn) = crate::hub::get_redis_conn().await {
+                        let _ = conn.set_ex::<_, _, ()>(
+                            format!("{}_status", bdl),
+                            "dropped_blacklist", 6*60*60
+                        ).await;
+                    }
+                });
                 // common_utils::metrics::SEARCHER_BUNDLE_DROP_TOTAL.inc();
                 return Ok(Response::new(SendBundleResponse { uuid: bundle_id }));
             }
         }
 
-        if let Ok(mut conn) = crate::hub::get_redis_conn().await {
-            for pkt in &bundle.clone().bundle.unwrap().packets {
-                let tx_sig = bincode::deserialize::<VersionedTransaction>(&pkt.data)
-                    .ok()
-                    .and_then(|tx| tx.signatures.get(0).cloned())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-
-                if tx_sig.is_empty() {
-                    continue;
-                }
-                tx_sigs.push(tx_sig.clone());
-
-                let exists: bool = conn.exists(&tx_sig).await.unwrap_or(false);
-                if exists {
-                    if seen_searcher_tx {
-                        log::warn!("🔍 Detected Front-run: mempool TX {tx_sig} is preceding");
-
-                        /* --- ClickHouse Log (Dropped) --- */
-                        log_to_clickhouse(ClickhouseLog {
-                            bundle_id: bundle_id.clone(),
-                            tx_sig,
-                            stage: "SEARCHER.bundle_dropped".into(),
-                            node: "searcher".into(),
-                            from_addr: remote_addr.clone(),
-                            description: "front-running detected → dropped".into(),
-                            ..Default::default()
-                        });
-
-                        /* --- Redis status --- */
-                        let _ = conn.set_ex::<_, _, ()>(
-                            format!("{bundle_id}_status"),
-                            "dropped",
-                            6 * 60 * 60, /* 6 h */
-                        ).await;
-
-                        common_utils::metrics::SEARCHER_BUNDLE_DROP_TOTAL.inc();
-
-                        return Ok(Response::new(SendBundleResponse { uuid: bundle_id }));
+        // get tx sigs
+        let mut tx_sigs = Vec::with_capacity(bundle.bundle.as_ref().map_or(0, |b| b.packets.len()));
+        if let Some(inner) = bundle.bundle.as_ref() {
+            for pkt in &inner.packets {
+                if let Some(sig) = crate::tx_fast::fast_first_signature_b58(&pkt.data) {
+                    if !sig.is_empty() {
+                        tx_sigs.push(sig);
                     }
-                } else {
-                    seen_searcher_tx = true;
+                }
+            }
+        }
+
+        /* ── 2-2. Detect Front-run ───────────────────── */
+        if !tx_sigs.is_empty() {
+            if let Ok(mut conn) = crate::hub::get_redis_conn().await {
+                // EXISTS batch pipeline
+                let mut pipe = redis::pipe();
+                for sig in &tx_sigs {
+                    pipe.cmd("EXISTS").arg(sig);
+                }
+
+                let exists_vec: Vec<i32> = pipe
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap_or_else(|e| { log::warn!("redis EXISTS pipeline failed: {e}"); vec![0; tx_sigs.len()] });
+
+                // Front-run detection
+                let mut seen_searcher_tx = false;
+                for (sig, ex) in tx_sigs.iter().zip(exists_vec.into_iter()) {
+                    let exists = ex != 0;
+                    if exists {
+                        if seen_searcher_tx {
+                            log::warn!("🔍 Detected Front-run: mempool TX {sig} is preceding");
+                            // ClickHouse 로그 (비동기 큐)
+                            log_to_clickhouse(ClickhouseLog {
+                                bundle_id: bundle_id.clone(),
+                                tx_sig: sig.clone(),
+                                stage: "SEARCHER.bundle_dropped".into(),
+                                node: "searcher".into(),
+                                from_addr: remote_addr.clone(),
+                                description: "front-running detected → dropped".into(),
+                                ..Default::default()
+                            });
+                            // Redis 상태 업데이트는 fire-and-forget
+                            let bdl = bundle_id.clone();
+                            tokio::spawn(async move {
+                                if let Ok(mut c2) = crate::hub::get_redis_conn().await {
+                                    let _ = c2.set_ex::<_, _, ()>(format!("{bdl}_status"), "dropped", 6*60*60).await;
+                                }
+                            });
+                            common_utils::metrics::SEARCHER_BUNDLE_DROP_TOTAL.inc();
+                            return Ok(Response::new(SendBundleResponse { uuid: bundle_id }));
+                        }
+                    } else {
+                        seen_searcher_tx = true;
+                    }
                 }
             }
         }
@@ -165,18 +179,20 @@ impl SearcherService for SearcherRpcSvc {
         }
 
         /* ── 4. Redis (tx list·queue·status) ────────────────────────── */
-        if let Ok(mut conn) = crate::hub::get_redis_conn().await {
-            let ttl = 6 * 60 * 60; // 6 h
-            let sig_join = tx_sigs.join(";");
-            let mut pipe = redis::pipe();
-            pipe.cmd("SETEX").arg(&bundle_id).arg(ttl).arg(&sig_join);
-            pipe.cmd("LPUSH").arg("bundle_queue").arg(&bundle_id);
-            pipe.cmd("SETEX")
-                .arg(format!("{bundle_id}_status"))
-                .arg(ttl)
-                .arg("submitted");
-            let _ = pipe.query_async::<_, ()>(&mut conn).await;
-        }
+        let ttl = 6 * 60 * 60; // 6 h
+        let sig_join = tx_sigs.join(";");
+        let bdl = bundle_id.clone();
+        tokio::spawn(async move {
+            if let Ok(mut conn) = crate::hub::get_redis_conn().await {
+                let mut pipe = redis::pipe();
+                pipe.cmd("SETEX").arg(&bdl).arg(ttl).arg(&sig_join);
+                pipe.cmd("LPUSH").arg("bundle_queue").arg(&bdl);
+                pipe.cmd("SETEX").arg(format!("{bdl}_status")).arg(ttl).arg("submitted");
+                let _: redis::RedisResult<()> = pipe.query_async(&mut conn).await;
+            } else {
+                log::warn!("send_bundle: failed to get redis conn for fire-and-forget write");
+            }
+        });
 
         /* ── 5. ClickHouse Logging (Accepted) ─────────────────────────── */
         for sig in &tx_sigs {
